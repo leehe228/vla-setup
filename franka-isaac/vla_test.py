@@ -1,128 +1,97 @@
 #!/usr/bin/env python3
 """
-TinyVLA ⇆ ROS2 ⇆ Isaac-Sim demo.
-Tested with:  Ubuntu 22.04, ROS 2 Humble, Python 3.10 (conda env 'tinyvla')
-
-Run:
-  conda activate tinyvla
-  python tinyvla_pipeline.py --model tinyvla_b --steps 100
+TinyVLA + ROS 2 Humble + Isaac Sim 4.5
+CPU-only OK (TinyVLA-S/B/H 선택 가능)
 """
-import argparse, sys, time, threading, random, math
-from typing import List
-
+import os, time, threading, argparse, numpy as np
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image, JointState
 from cv_bridge import CvBridge
-import numpy as np
 import cv2
 
-# --- TinyVLA -------------------------------------------------------
-from tinyvla import TinyVLA, Processor        # provided by `pip install -e .`
+# TinyVLA modules (import 경로는 PYTHONPATH로 해결)
+from llava_pythia.conversation import conv_templates
+from llava_pythia.model.builder import load_pretrained_model          # 백본 로드
+from tinyvla.policy_heads.act_diffusion import ActPolicy             # diffusion head
 
-# ---- simple joint delta helper (very crude!) ----------------------
-PANDA_JOINT_LIMIT = np.array([2.8, 1.76, 2.8, -0.05, 2.9, 3.0, 2.9])
-def cartesian_to_joint(deltas_xyzr: np.ndarray,
-                       q_prev: np.ndarray,
-                       gain_pos=0.4,
-                       gain_rot=0.2) -> np.ndarray:
-    """Map 6-DoF delta to 7 Panda joint increments (heuristic)."""
-    dx, dy, dz, drx, dry, drz = deltas_xyzr[:6]
-    # naïve mapping: first 3 joints → xyz, next 3 → rot, joint7 = grip placeholder
-    q_delta = np.array([dx, dy, dz, drx, dry, drz, 0.0])
-    q_delta[:3] *= gain_pos
-    q_delta[3:6] *= gain_rot
-    q_next = np.clip(q_prev + q_delta, -PANDA_JOINT_LIMIT, PANDA_JOINT_LIMIT)
-    return q_next
+# ---------- 설치 경로 자동 검색 (checkout 폴더 기준) -------------
+ROOT = os.getenv("TINYVLA_HOME", os.path.dirname(os.path.abspath(__file__)))
+BACKBONE = os.path.join(ROOT, "checkpoints/llava_pythia_400m")  # 사전 제공된 weight 경로
+POLICY   = os.path.join(ROOT, "checkpoints/diffusion_head")     # TinyVLA diffusion head
 
-# ---- ROS-2 Node ---------------------------------------------------
-class TinyVLAPipeline(Node):
-    def __init__(self, model_name: str, steps: int):
-        super().__init__('tinyvla_pipeline')
-        self.bridge   = CvBridge()
-        self.image    = None            # latest BGR image
-        self.q_prev   = np.zeros(7)     # keep last joint command
-        self.steps    = steps
+# ------------- 1 Hz 컨트롤 노드 ---------------------------------
+class TinyVLAROS(Node):
+    def __init__(self, max_iter=100):
+        super().__init__("tinyvla_controller")
+        self.bridge = CvBridge()
+        self.image  = None
+        self.q_prev = np.zeros(7)
+        self.max_iter = max_iter
+        self.pub = self.create_publisher(JointState, "/joint_command", 10)
+        self.create_subscription(Image, "/rgb", self.img_cb, 10)
 
-        # subscriptions / publications
-        self.create_subscription(Image, '/rgb',
-                                 self.img_cb, 10)
-        self.pub = self.create_publisher(JointState,
-                                         '/joint_command', 10)
+        # TinyVLA 로드 (CPU) -----------------------------------
+        templ = conv_templates["pythia"].copy()
+        self.tokenizer, self.backbone, self.image_proc, _ = \
+            load_pretrained_model(BACKBONE, None, "pythia", fp16=False, device="cpu")
+        self.policy = ActPolicy.load_from_pretrained(POLICY, device="cpu")
+        self.conv_template = templ
 
-        # Load model (CPU by default)
-        self.processor = Processor.from_pretrained(
-            f"tinyvla/backbones/{model_name}")
-        self.model     = TinyVLA.from_pretrained(
-            f"tinyvla/weights/{model_name}")
-        self.get_logger().info(f"TinyVLA '{model_name}' loaded.")
+        self.get_logger().info("TinyVLA ready – enter instruction in terminal...")
+        threading.Thread(target=self.prompt_loop, daemon=True).start()
 
-        # user prompt thread
-        threading.Thread(target=self.prompt_loop,
-                         daemon=True).start()
-
+    # 이미지 콜백 → 최신 프레임 저장
     def img_cb(self, msg: Image):
         try:
-            self.image = self.bridge.imgmsg_to_cv2(msg, 'bgr8')
+            self.image = self.bridge.imgmsg_to_cv2(msg, "bgr8")
         except Exception as e:
-            self.get_logger().error(f'CvBridge: {e}')
+            self.get_logger().error(f"cv_bridge err {e}")
 
-    # ---------------------------------------------------------------
+    # 사용자 프롬프트 루프
     def prompt_loop(self):
-        count = 0
-        while count < self.steps and rclpy.ok():
-            text = input("\nInstruction > ").strip()
-            if not text:
-                print("empty prompt – skipping")
-                continue
+        it = 0
+        while rclpy.ok() and it < self.max_iter:
+            prompt = input("\n▶ Instruction: ").strip()
+            if not prompt: continue
             if self.image is None:
-                print("waiting for first camera frame …")
-                time.sleep(0.2); continue
+                print("  (waiting camera...)"); time.sleep(0.2); continue
 
-            # 1) preprocess
-            _in = self.processor(images=[self.image],
-                                 text=[text],
-                                 return_tensors="pt")
+            # 1) 이미지 전처리
+            img_tensor = self.image_proc.preprocess(self.image,
+                                                    return_tensors='pt')['pixel_values']
+            # 2) 프롬프트 템플릿 조립
+            conv = self.conv_template.copy()
+            conv.append_message(conv.roles[0], "<image>\n"+prompt)
+            conv.append_message(conv.roles[1], None)
+            input_ids = self.tokenizer(conv.get_prompt(), return_tensors='pt').input_ids
 
-            # 2) model inference  ----------------------------------
-            with self.get_logger().profiling():
-                out = self.model(**_in)
+            # 3) backbone → diffusion head
+            with torch.no_grad():
+                feat = self.backbone(images=img_tensor, input_ids=input_ids)
+                cart6d = self.policy(feat).cpu().numpy()[0]    # [dx..drz, grip]
 
-            action = out.action[0].detach().cpu().numpy()  # [dx…drz, grip]
-            # clamp & scale
-            action[:6] = np.clip(action[:6], -1, 1) * 0.05  # 5 cm / rad max
-            grip = int(np.sign(action[6]))                  # -1,0,1
-            # 3) convert to 7-joint
-            q_cmd = cartesian_to_joint(action, self.q_prev)
-            self.q_prev = q_cmd
+            # 4) 6-DoF → 7 Franka 엉성 IK (직접 델타)
+            dq = np.zeros(7)
+            dq[:3] = cart6d[:3] * 0.2                # 위치 비율
+            dq[3:6] = cart6d[3:6] * 0.1              # 각도 비율
+            self.q_prev = np.clip(self.q_prev + dq,
+                                  [-2.8, -1.76, -2.8, -3.0, -2.9, -3.0, -2.9],
+                                  [ 2.8,  1.76,  2.8,  3.0,  2.9,  3.0,  2.9])
 
-            # 4) publish
+            # 5) Publish
             js = JointState()
             js.header.stamp = self.get_clock().now().to_msg()
-            js.name = [f'panda_joint{i}' for i in range(1, 8)]
-            js.position = q_cmd.tolist()
+            js.name = [f"panda_joint{i}" for i in range(1,8)]
+            js.position = self.q_prev.tolist()
             self.pub.publish(js)
-            self.get_logger().info(f'[{count}] sent joints {q_cmd.round(3)}')
-            count += 1
-            time.sleep(1.0)  # 1 Hz
+            self.get_logger().info(f"{it:03d}  dq={dq.round(3)}")
+            it += 1
+            time.sleep(1.0)
 
-# ------------------- main ------------------------------------------
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--model', default='tinyvla_b',
-                        help='tinyvla_s | tinyvla_b | tinyvla_h etc.')
-    parser.add_argument('--steps', type=int, default=100)
-    args = parser.parse_args()
-
+# ---------------- main -----------------
+if __name__ == "__main__":
     rclpy.init()
-    node = TinyVLAPipeline(args.model, args.steps)
-    try:
-        rclpy.spin(node)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        node.destroy_node()
-        rclpy.shutdown()
-
-if __name__ == '__main__':
-    main()
+    TinyVLAROS(max_iter=100)
+    rclpy.spin()
+    rclpy.shutdown()
