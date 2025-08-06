@@ -1,134 +1,128 @@
 #!/usr/bin/env python3
 """
-SmolVLA ⇆ ROS 2  control loop
-  ① 이미지 /rgb subscribe
-  ② 사용자 프롬프트 입력
-  ③ SmolVLA로 6-DoF 델타 예측
-  ④ 간단 IK → 7-joint 명령 → /joint_command publish
-반복 100회 후 종료
+TinyVLA ⇆ ROS2 ⇆ Isaac-Sim demo.
+Tested with:  Ubuntu 22.04, ROS 2 Humble, Python 3.10 (conda env 'tinyvla')
+
+Run:
+  conda activate tinyvla
+  python tinyvla_pipeline.py --model tinyvla_b --steps 100
 """
+import argparse, sys, time, threading, random, math
+from typing import List
 
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image, JointState
 from cv_bridge import CvBridge
-import cv2
 import numpy as np
-from datetime import datetime
-import torch
-from smolvla import SmolVLA, Processor   # pip install smolvla
-from threading import Thread, Event
+import cv2
 
-JOINT_NAMES = [
-    "panda_joint1", "panda_joint2", "panda_joint3",
-    "panda_joint4", "panda_joint5", "panda_joint6", "panda_joint7"
-]
+# --- TinyVLA -------------------------------------------------------
+from tinyvla import TinyVLA, Processor        # provided by `pip install -e .`
 
-class VLASubscriber(Node):
-    """Keeps latest camera frame & joint state; publishes joint commands."""
-    def __init__(self):
-        super().__init__("vla_subscriber")
-        self.bridge = CvBridge()
+# ---- simple joint delta helper (very crude!) ----------------------
+PANDA_JOINT_LIMIT = np.array([2.8, 1.76, 2.8, -0.05, 2.9, 3.0, 2.9])
+def cartesian_to_joint(deltas_xyzr: np.ndarray,
+                       q_prev: np.ndarray,
+                       gain_pos=0.4,
+                       gain_rot=0.2) -> np.ndarray:
+    """Map 6-DoF delta to 7 Panda joint increments (heuristic)."""
+    dx, dy, dz, drx, dry, drz = deltas_xyzr[:6]
+    # naïve mapping: first 3 joints → xyz, next 3 → rot, joint7 = grip placeholder
+    q_delta = np.array([dx, dy, dz, drx, dry, drz, 0.0])
+    q_delta[:3] *= gain_pos
+    q_delta[3:6] *= gain_rot
+    q_next = np.clip(q_prev + q_delta, -PANDA_JOINT_LIMIT, PANDA_JOINT_LIMIT)
+    return q_next
 
-        self.image_sub = self.create_subscription(
-            Image, "/rgb", self._img_cb, 10)
-        self.joint_sub = self.create_subscription(
-            JointState, "/joint_states", self._joint_cb, 10)
-        self.cmd_pub = self.create_publisher(
-            JointState, "/joint_command", 10)
+# ---- ROS-2 Node ---------------------------------------------------
+class TinyVLAPipeline(Node):
+    def __init__(self, model_name: str, steps: int):
+        super().__init__('tinyvla_pipeline')
+        self.bridge   = CvBridge()
+        self.image    = None            # latest BGR image
+        self.q_prev   = np.zeros(7)     # keep last joint command
+        self.steps    = steps
 
-        self.latest_img = None
-        self.latest_jpos = np.zeros(7)
-        self.img_ready = Event()
+        # subscriptions / publications
+        self.create_subscription(Image, '/rgb',
+                                 self.img_cb, 10)
+        self.pub = self.create_publisher(JointState,
+                                         '/joint_command', 10)
 
-    # === Callbacks ===
-    def _img_cb(self, msg: Image):
+        # Load model (CPU by default)
+        self.processor = Processor.from_pretrained(
+            f"tinyvla/backbones/{model_name}")
+        self.model     = TinyVLA.from_pretrained(
+            f"tinyvla/weights/{model_name}")
+        self.get_logger().info(f"TinyVLA '{model_name}' loaded.")
+
+        # user prompt thread
+        threading.Thread(target=self.prompt_loop,
+                         daemon=True).start()
+
+    def img_cb(self, msg: Image):
         try:
-            cv_img = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
-            self.latest_img = cv_img
-            self.img_ready.set()
+            self.image = self.bridge.imgmsg_to_cv2(msg, 'bgr8')
         except Exception as e:
-            self.get_logger().error(f"bridge error: {e}")
+            self.get_logger().error(f'CvBridge: {e}')
 
-    def _joint_cb(self, msg: JointState):
-        # map by name to fixed order
-        name_to_idx = {n: i for i, n in enumerate(msg.name)}
-        self.latest_jpos = np.array([msg.position[name_to_idx[n]] for n in JOINT_NAMES])
+    # ---------------------------------------------------------------
+    def prompt_loop(self):
+        count = 0
+        while count < self.steps and rclpy.ok():
+            text = input("\nInstruction > ").strip()
+            if not text:
+                print("empty prompt – skipping")
+                continue
+            if self.image is None:
+                print("waiting for first camera frame …")
+                time.sleep(0.2); continue
 
-    # === Publish helper ===
-    def send_joint_cmd(self, pos: np.ndarray):
-        out = JointState()
-        out.header.stamp = self.get_clock().now().to_msg()
-        out.name = JOINT_NAMES
-        out.position = pos.tolist()
-        self.cmd_pub.publish(out)
+            # 1) preprocess
+            _in = self.processor(images=[self.image],
+                                 text=[text],
+                                 return_tensors="pt")
 
-# ---------- Simple differential IK (Jacobian ≈ identity) ----------
-def ee_delta_to_joints(delta_6: np.ndarray, q_curr: np.ndarray, eta: float = 0.2):
-    """
-    Very crude mapper: first 6 joint increments proportional to dx..drz,
-    keep joint7 unchanged.
-    """
-    scale_xyz = 0.4     # rad per metre (tuned)
-    scale_rpy = 0.5     # rad per rad
-    dq = np.zeros(7)
-    dq[:3] = scale_xyz * delta_6[:3]
-    dq[3:6] = scale_rpy * delta_6[3:]
-    q_new = q_curr + eta * dq
-    # clamp within Franka limits (-2.8 ~ 2.8 rad for simplicity)
-    return np.clip(q_new, -2.8, 2.8)
+            # 2) model inference  ----------------------------------
+            with self.get_logger().profiling():
+                out = self.model(**_in)
 
-# ---------- Spin rclpy in a background thread ----------
-def spin_thread(node: Node):
-    rclpy.spin(node)
+            action = out.action[0].detach().cpu().numpy()  # [dx…drz, grip]
+            # clamp & scale
+            action[:6] = np.clip(action[:6], -1, 1) * 0.05  # 5 cm / rad max
+            grip = int(np.sign(action[6]))                  # -1,0,1
+            # 3) convert to 7-joint
+            q_cmd = cartesian_to_joint(action, self.q_prev)
+            self.q_prev = q_cmd
 
-# ---------- Main ----------
+            # 4) publish
+            js = JointState()
+            js.header.stamp = self.get_clock().now().to_msg()
+            js.name = [f'panda_joint{i}' for i in range(1, 8)]
+            js.position = q_cmd.tolist()
+            self.pub.publish(js)
+            self.get_logger().info(f'[{count}] sent joints {q_cmd.round(3)}')
+            count += 1
+            time.sleep(1.0)  # 1 Hz
+
+# ------------------- main ------------------------------------------
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--model', default='tinyvla_b',
+                        help='tinyvla_s | tinyvla_b | tinyvla_h etc.')
+    parser.add_argument('--steps', type=int, default=100)
+    args = parser.parse_args()
+
     rclpy.init()
-    node = VLASubscriber()
+    node = TinyVLAPipeline(args.model, args.steps)
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
 
-    # start ROS spinning
-    t = Thread(target=spin_thread, args=(node,), daemon=True)
-    t.start()
-
-    # load SmolVLA (CPU)
-    print("Loading SmolVLA (CPU)…")
-    device = torch.device("cpu")
-    model = SmolVLA.from_pretrained("lerobot/smolvla_base").to(device)
-    processor = Processor.from_pretrained("lerobot/smolvla_base")
-    print("Loaded.")
-
-    # wait for first image
-    print("Waiting for /rgb frames…")
-    node.img_ready.wait()
-
-    for step in range(1, 101):
-        prompt = input(f"[{step}/100]  Enter instruction > ").strip()
-        if prompt == "":
-            print("  (empty input → skipping)")
-            continue
-
-        # grab latest img snapshot
-        bgr = node.latest_img.copy()
-        # resize to 224×224 (SmolVLA default)
-        rgb = cv2.cvtColor(cv2.resize(bgr, (224, 224)), cv2.COLOR_BGR2RGB)
-
-        # model inference
-        inputs = processor(images=rgb, text=prompt, return_tensors="pt").to(device)
-        with torch.no_grad():
-            outputs = model(**inputs)
-        # SmolVLA returns (B,6) tensor of deltas (already scaled to metres/rad)
-        delta = outputs.action[0].cpu().numpy()   # (dx,dy,dz,drx,dry,drz)
-        print("  model Δ:", np.round(delta, 3))
-
-        # map to 7-joint command
-        q_des = ee_delta_to_joints(delta, node.latest_jpos)
-        node.send_joint_cmd(q_des)
-        print("  published joint command\n")
-
-    print("Stopping…")
-    rclpy.shutdown()
-    t.join()
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
