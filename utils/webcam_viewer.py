@@ -1,40 +1,50 @@
 #!/usr/bin/env python3
 """
-Read frames from the first USB webcam (index-0) and show them in a window.
-Press “q” to quit.  Works on Linux, Windows, macOS if OpenCV is installed.
+Auto-detect and open the first working USB webcam on Linux.
+Press 'q' to quit.
 """
 
-import cv2                     # pip install opencv-python
-import time
+import glob                                             # 표준 라이브러리
+import cv2                                              # pip install opencv-python
+import sys
 
-def main(cam_index: int = 0):
-    cap = cv2.VideoCapture(cam_index, cv2.CAP_DSHOW)   # on Linux just omit CAP_DSHOW
+def find_working_camera(max_index: int = 10):
+    """
+    /dev/video*를 순회하며 VideoCapture가 성공하는 첫 인덱스를 반환합니다.
+    """
+    # /dev/video0, /dev/video1, ... 을 glob으로 수집
+    devs = sorted(glob.glob('/dev/video*'))
+    for dev in devs:
+        try:
+            idx = int(dev.replace('/dev/video',''))
+        except ValueError:
+            continue
+        cap = cv2.VideoCapture(idx)                     # 인덱스 시도
+        if cap.isOpened():
+            cap.release()
+            print(f"✅  Found working camera: index={idx} ({dev})")
+            return idx
+    print("❌  No working camera found.")
+    return None
 
-    if not cap.isOpened():
-        raise RuntimeError(f"Camera index {cam_index} could not be opened")
+def main():
+    cam_index = find_working_camera()
+    if cam_index is None:
+        sys.exit(1)
 
-    print("Camera opened.  Press  q  in the window to quit.")
-    fps_counter, t0 = 0, time.time()
+    # 발견된 카메라 인덱스로 비디오 캡처 시작
+    cap = cv2.VideoCapture(cam_index)
+    print(f"▶️  Opening camera at index {cam_index}. Press 'q' to quit.")
 
     while True:
-        ok, frame = cap.read()
-        if not ok:
-            print("Frame grab failed; retrying …")
-            continue
-
-        # optional: resize or process frame here
-        cv2.imshow("USB Webcam (press q to quit)", frame)
-        fps_counter += 1
-
-        # exit on key-press
-        if cv2.waitKey(1) & 0xFF == ord('q'):
+        ret, frame = cap.read()
+        if not ret:
+            print("⚠️  Frame grab failed; exiting.")
             break
 
-        # simple FPS display in console
-        if fps_counter >= 60:
-            t1 = time.time()
-            print(f"FPS ≈ {fps_counter/(t1-t0):.1f}")
-            fps_counter, t0 = 0, t1
+        cv2.imshow(f"Webcam Index {cam_index}", frame)
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
 
     cap.release()
     cv2.destroyAllWindows()
