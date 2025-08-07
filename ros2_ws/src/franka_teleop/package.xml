@@ -1,0 +1,21 @@
+<?xml version="3.0"?>
+<package format="3">
+  <name>franka_teleop</name>
+  <version>0.1.0</version>
+  <description>Interactive CLI teleoperation node for Franka Research 3.</description>
+  <maintainer email="you@example.com">Your Name</maintainer>
+  <license>Apache-2.0</license>
+
+  <!-- Build & run dependencies -->
+  <exec_depend>rclpy</exec_depend>              <!-- Core ROS 2 Python API  [oai_citation:0‡ROS Documentation](https://docs.ros.org/en/foxy/Tutorials/Beginner-Client-Libraries/Creating-Your-First-ROS2-Package.html?utm_source=chatgpt.com) -->
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>trajectory_msgs</exec_depend>    <!-- JointTrajectory msg  [oai_citation:1‡ROS 2 Documentation](https://docs.ros2.org/foxy/api/trajectory_msgs/msg/JointTrajectory.html?utm_source=chatgpt.com) -->
+  <exec_depend>control_msgs</exec_depend>       <!-- FollowJointTrajectory action  [oai_citation:2‡ROS Documentation](https://docs.ros.org/en/noetic/api/control_msgs/html/action/FollowJointTrajectory.html?utm_source=chatgpt.com) -->
+  <exec_depend>franka_msgs</exec_depend>        <!-- GripperCommand action  [oai_citation:3‡ROS Documentation](https://docs.ros.org/en/humble/p/franka_msgs/?utm_source=chatgpt.com) -->
+  <exec_depend>builtin_interfaces</exec_depend>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
