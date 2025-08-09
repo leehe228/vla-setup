@@ -45,6 +45,10 @@ GRIPPER_SPEED      = float(os.environ.get("GRIPPER_SPEED", "0.10"))
 # move_to_goal speed_scale 기본값(0.05~1.0 권장)
 ARM_SPEED_SCALE    = float(os.environ.get("ARM_SPEED_SCALE", "0.20"))
 
+ACTION_SCALE   = 0.5
+PER_STEP_CLAMP = 0.10
+GRIPPER_STEP   = 0.005
+
 LOG_DIR            = os.environ.get("LOG_DIR", "./logs")
 os.makedirs(LOG_DIR, exist_ok=True)
 logging.basicConfig(
@@ -378,47 +382,110 @@ def main():
             if actions.shape != (10, 8):
                 log.error(f"Unexpected action shape: {actions.shape}")
                 continue
+            
+            q_curr = arm_q.copy()
+            grip_curr = float(grip_w)
 
             # 4) k개만 실행(각 단계마다 사용자 확인)
-            for i in range(min(K_ACTIONS, actions.shape[0])):
-                act = actions[i]
-                q_goal = act[:7].astype(float).tolist()
-                grip_t = float(act[7])
+            # for i in range(min(K_ACTIONS, actions.shape[0])):
+            #     act = actions[i]
+            #     q_goal = act[:7].astype(float).tolist()
+            #     grip_t = float(act[7])
 
-                log.info(f"[ACTION {i+1}/{K_ACTIONS}] q_goal={np.array(q_goal)}  grip_target={grip_t:.4f} m")
+            #     log.info(f"[ACTION {i+1}/{K_ACTIONS}] q_goal={np.array(q_goal)}  grip_target={grip_t:.4f} m")
+
+            #     _ = input("이 액션을 실행할까요? (엔터=실행 / ctrl+c=중단): ")
+
+            #     # 4-1) 그리퍼 먼저
+            #     try:
+            #         node.gripper_move(width_m=clamp(grip_t, 0.0, 0.08), speed_mps=GRIPPER_SPEED)
+            #     except Exception as e:
+            #         log.error(f"Gripper move error: {e}")
+
+            #     # 4-2) 팔 이동: inactive → set params → active
+            #     try:
+            #         # 비활성화
+            #         node.switch_controller(start=[], stop=[CONTROLLER_NAME], strict=True, timeout_s=5.0)
+            #     except Exception as e:
+            #         log.warning(f"Deactivate skipped/failed: {e}")
+
+            #     # 파라미터 적용
+            #     try:
+            #         node.set_move_to_goal(q_goal=q_goal, speed_scale=ARM_SPEED_SCALE)
+            #     except Exception as e:
+            #         log.error(f"set_move_to_goal failed: {e}")
+            #         continue
+
+            #     # 활성화(이때 move_to_goal이 on_activate에서 최신 파라미터로 궤적 생성)
+            #     try:
+            #         node.switch_controller(start=[CONTROLLER_NAME], stop=[], strict=True, timeout_s=5.0)
+            #     except Exception as e:
+            #         log.error(f"Activate failed: {e}")
+            #         continue
+
+            #     # 완료 대기 (컨트롤러가 process_finished=true로 세팅)
+            #     finished = node.wait_process_finished(timeout_s=12.0)
+            #     log.info(f"Arm motion finished={finished}")
+            
+            for i in range(min(K_ACTIONS, actions.shape[0])):
+                act = actions[i].astype(float)
+                dq_raw   = ACTION_SCALE * act[:7]              # (7,) Δrad
+                dq       = np.clip(dq_raw, -PER_STEP_CLAMP, +PER_STEP_CLAMP)
+                d_grip   = float(act[7]) * GRIPPER_STEP        # Δm
+
+                q_goal   = (q_curr + dq).tolist()
+                grip_goal= clamp(grip_curr + d_grip, 0.0, 0.08)
+
+                log.info(
+                    "[ACTION %d/%d]\n"
+                    "  q_curr= %s\n"
+                    "  Δq    = %s (clamped by %.3f)\n"
+                    "  q_goal= %s\n"
+                    "  grip_curr= %.4f m, Δgrip= %.4f m -> grip_goal= %.4f m",
+                    i+1, K_ACTIONS,
+                    np.array2string(q_curr, precision=4),
+                    np.array2string(dq,    precision=4), PER_STEP_CLAMP,
+                    np.array2string(np.array(q_goal), precision=4),
+                    grip_curr, d_grip, grip_goal
+                )
 
                 _ = input("이 액션을 실행할까요? (엔터=실행 / ctrl+c=중단): ")
 
-                # 4-1) 그리퍼 먼저
+                # 1) 그리퍼 먼저
                 try:
-                    node.gripper_move(width_m=clamp(grip_t, 0.0, 0.08), speed_mps=GRIPPER_SPEED)
+                    node.gripper_move(width_m=grip_goal, speed_mps=GRIPPER_SPEED)
                 except Exception as e:
                     log.error(f"Gripper move error: {e}")
 
-                # 4-2) 팔 이동: inactive → set params → active
+                # 2) 팔 이동: inactive → set params → active
                 try:
-                    # 비활성화
                     node.switch_controller(start=[], stop=[CONTROLLER_NAME], strict=True, timeout_s=5.0)
                 except Exception as e:
                     log.warning(f"Deactivate skipped/failed: {e}")
 
-                # 파라미터 적용
                 try:
                     node.set_move_to_goal(q_goal=q_goal, speed_scale=ARM_SPEED_SCALE)
                 except Exception as e:
                     log.error(f"set_move_to_goal failed: {e}")
                     continue
 
-                # 활성화(이때 move_to_goal이 on_activate에서 최신 파라미터로 궤적 생성)
                 try:
                     node.switch_controller(start=[CONTROLLER_NAME], stop=[], strict=True, timeout_s=5.0)
                 except Exception as e:
                     log.error(f"Activate failed: {e}")
                     continue
 
-                # 완료 대기 (컨트롤러가 process_finished=true로 세팅)
                 finished = node.wait_process_finished(timeout_s=12.0)
                 log.info(f"Arm motion finished={finished}")
+
+                # 3) 실행 후 실제 상태를 다시 읽어 다음 Δ 적용 기준 업데이트
+                try:
+                    q_curr, grip_curr = node.get_latest_state(wait_sec=2.0)
+                except Exception as e:
+                    log.warning(f"Failed to refresh state after action: {e}")
+                    # 실패해도 로컬 추정치로 계속 진행
+                    q_curr   = np.array(q_goal, dtype=float)
+                    grip_curr= grip_goal
 
             # 5) 다음 루프(새 상태/이미지로 다시 추론)
 
