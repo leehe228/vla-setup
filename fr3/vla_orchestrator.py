@@ -51,6 +51,7 @@ PER_STEP_CLAMP = 0.10
 GRIPPER_STEP   = 0.005
 
 CAM_WARMUP_SEC = 0.15
+CAM_FLUSH_MS = 120
 
 LOG_DIR            = os.environ.get("LOG_DIR", "./logs")
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -283,6 +284,8 @@ def open_camera(index: int) -> cv2.VideoCapture:
     cap = cv2.VideoCapture(index, cv2.CAP_V4L2)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH,  640)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
     if not cap.isOpened():
         raise RuntimeError(f"Cannot open camera index {index}")
 
@@ -290,7 +293,6 @@ def open_camera(index: int) -> cv2.VideoCapture:
     while time.time() < t_end:
         cap.read()
         time.sleep(0.01)
-
     return cap
 
 def _looks_green(frame: np.ndarray) -> bool:
@@ -301,19 +303,32 @@ def _looks_green(frame: np.ndarray) -> bool:
     return (gm > 60.0) and (gm > 1.3 * rm) and (gm > 1.3 * bm)
 
 def grab_244(cap: cv2.VideoCapture) -> np.ndarray:
-    ok, frame = cap.read()
+    t_end = time.time() + (CAM_FLUSH_MS / 1000.0)
+    while time.time() < t_end:
+        cap.grab()
+
+    ok = cap.grab()
     if not ok:
-        raise RuntimeError("Failed to grab frame")
+        raise RuntimeError("Failed to grab (final) frame")
+    ok, frame = cap.retrieve()
+    if not ok:
+        raise RuntimeError("Failed to retrieve frame")
 
     tries = 5
     while _looks_green(frame) and tries > 0:
         time.sleep(0.03)
-        ok, f2 = cap.read()
+        cap.grab()
+        ok, f2 = cap.retrieve()
         if ok:
             frame = f2
         tries -= 1
 
-    resized_bgr = cv2.resize(frame, (IMG_SIZE, IMG_SIZE), interpolation=cv2.INTER_AREA)
+    h, w = frame.shape[:2]
+    s = min(h, w)
+    y0 = (h - s) // 2
+    x0 = (w - s) // 2
+    crop = frame[y0:y0 + s, x0:x0 + s]
+    resized_bgr = cv2.resize(crop, (IMG_SIZE, IMG_SIZE), interpolation=cv2.INTER_AREA)
 
     return resized_bgr[:, :, ::-1]
 
