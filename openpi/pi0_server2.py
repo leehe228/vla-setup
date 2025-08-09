@@ -156,3 +156,4 @@ def infer(body: RequestBody):
     except Exception as e:
         log.exception("Unhandled error during inference.")
         raise HTTPException(status_code=400, detail=str(e))
+
