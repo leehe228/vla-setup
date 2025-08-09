@@ -176,7 +176,7 @@ class FrankaOrchestrator(Node):
         resp = fut.result()
         if not (resp and resp.ok):
             raise RuntimeError(f"load_controller({name}) failed")
-        log.info(f"Loaded controller: {name}")
+        print(f"Loaded controller: {name}")
 
     def configure_controller(self, name: str):
         self.wait_service(self._configure_cli, "configure_controller")
@@ -187,7 +187,7 @@ class FrankaOrchestrator(Node):
         resp = fut.result()
         if not (resp and resp.ok):
             raise RuntimeError(f"configure_controller({name}) failed")
-        log.info(f"Configured controller: {name}")
+        print(f"Configured controller: {name}")
 
     def switch_controller(self, start: List[str], stop: List[str], strict=True, timeout_s: float = 5.0):
         self.wait_service(self._switch_cli, "switch_controller")
@@ -202,9 +202,9 @@ class FrankaOrchestrator(Node):
         if not (resp and resp.ok):
             raise RuntimeError(f"switch_controller(start={start}, stop={stop}) failed")
         if start:
-            log.info(f"Activated: {start}")
+            print(f"Activated: {start}")
         if stop:
-            log.info(f"Deactivated: {stop}")
+            print(f"Deactivated: {stop}")
 
     # ---------------------------
     # move_to_goal 파라미터 I/O
@@ -222,7 +222,7 @@ class FrankaOrchestrator(Node):
         resp = fut.result()
         if not resp or not all(r.successful for r in resp.results):
             raise RuntimeError("set_parameters on move_to_goal failed")
-        log.info(f"Set move_to_goal: speed_scale={speed_scale:.3f}, q_goal={np.array(q_goal)}")
+        print(f"Set move_to_goal: speed_scale={speed_scale:.3f}, q_goal={np.array(q_goal)}")
 
     def wait_process_finished(self, timeout_s: float = 10.0) -> bool:
         self.wait_service(self._get_params_cli, "get_parameters")
@@ -254,13 +254,13 @@ class FrankaOrchestrator(Node):
         rclpy.spin_until_future_complete(self, fut)
         handle = fut.result()
         if not handle:
-            log.error("Failed to send gripper Move goal")
+            print("Failed to send gripper Move goal")
             return False
         res_fut = handle.get_result_async()
         rclpy.spin_until_future_complete(self, res_fut)
         result = res_fut.result()
         ok = bool(result and result.result and result.result.success)
-        log.info(f"Gripper Move to width={goal.width:.3f} m @ {goal.speed:.2f} m/s → success={ok}")
+        print(f"Gripper Move to width={goal.width:.3f} m @ {goal.speed:.2f} m/s → success={ok}")
         return ok
 
     def gripper_homing(self) -> bool:
@@ -270,13 +270,13 @@ class FrankaOrchestrator(Node):
         rclpy.spin_until_future_complete(self, fut)
         handle = fut.result()
         if not handle:
-            log.error("Failed to send gripper Homing goal")
+            print("Failed to send gripper Homing goal")
             return False
         res_fut = handle.get_result_async()
         rclpy.spin_until_future_complete(self, res_fut)
         result = res_fut.result()
         ok = bool(result and result.result and result.result.success)
-        log.info(f"Gripper Homing → success={ok}")
+        print(f"Gripper Homing → success={ok}")
         return ok
 
 
@@ -350,11 +350,11 @@ def post_to_server(ext_img: np.ndarray, wrist_img: np.ndarray,
     resp.raise_for_status()
     out = resp.json()
     actions = np.array(out["actions"], dtype=np.float32)  # shape (10, 8)
-    log.info(f"VLA response in {time.time()-t0:.3f}s: actions.shape={actions.shape}")
+    print(f"VLA response in {time.time()-t0:.3f}s: actions.shape={actions.shape}")
     # 로깅 저장
     npy_path = os.path.join(LOG_DIR, f"actions_{int(time.time())}.npy")
     np.save(npy_path, actions)
-    log.info(f"Saved actions to {npy_path}")
+    print(f"Saved actions to {npy_path}")
     return actions
 
 
@@ -364,12 +364,12 @@ def ensure_controller_ready(node: FrankaOrchestrator):
     try:
         node.load_controller(CONTROLLER_NAME)
     except Exception as e:
-        log.warning(f"load_controller skipped or failed (maybe already loaded): {e}")
+        print(f"load_controller skipped or failed (maybe already loaded): {e}")
 
     try:
         node.configure_controller(CONTROLLER_NAME)
     except Exception as e:
-        log.warning(f"configure_controller skipped or failed (maybe already configured): {e}")
+        print(f"configure_controller skipped or failed (maybe already configured): {e}")
 
 
 def main():
@@ -379,7 +379,7 @@ def main():
     # 카메라 오픈
     cap_front = open_camera(CAM_FRONT_INDEX)
     cap_wrist = open_camera(CAM_WRIST_INDEX)
-    log.info(f"Opened cameras: front={CAM_FRONT_INDEX}, wrist={CAM_WRIST_INDEX}")
+    print(f"Opened cameras: front={CAM_FRONT_INDEX}, wrist={CAM_WRIST_INDEX}")
 
     # 컨트롤러 준비
     ensure_controller_ready(node)
@@ -388,10 +388,10 @@ def main():
     try:
         node.gripper_homing()
     except Exception as e:
-        log.warning(f"Gripper homing skipped: {e}")
+        print(f"Gripper homing skipped: {e}")
 
     # 프롬프트 최초 입력
-    base_prompt = input("초기 프롬프트를 입력하세요 (예: '노란 박스를 공 옆으로 옮겨'): ").strip()
+    base_prompt = input("[PROMPT] Enter initial prompt: ").strip()
     if not base_prompt:
         base_prompt = "Move the yellow box next to the ball."
 
@@ -399,7 +399,7 @@ def main():
     try:
         while True:
             step += 1
-            log.info(f"===== ITERATION {step} =====")
+            print(f"===== ITERATION {step} =====")
 
             # 1) 상태 & 이미지 수집
             arm_q, grip_w = node.get_latest_state(wait_sec=3.0)
@@ -407,14 +407,14 @@ def main():
             wrist_img= grab_244(cap_wrist)
 
             # 2) 프롬프트 입력(빈 입력이면 유지)
-            new_prompt = input("[프롬프트] (엔터=유지): ").strip()
-            if new_prompt:
-                base_prompt = new_prompt
+            # new_prompt = input("[PROMPT] (Press enter to keep): ").strip()
+            # if new_prompt:
+            #     base_prompt = new_prompt
 
             # 3) 서버로 전송 → 액션 토큰 수신
             actions = post_to_server(ext_img, wrist_img, arm_q, grip_w, base_prompt)
             if actions.shape != (10, 8):
-                log.error(f"Unexpected action shape: {actions.shape}")
+                print(f"Unexpected action shape: {actions.shape}")
                 continue
             
             q_curr = arm_q.copy()
@@ -426,7 +426,7 @@ def main():
             #     q_goal = act[:7].astype(float).tolist()
             #     grip_t = float(act[7])
 
-            #     log.info(f"[ACTION {i+1}/{K_ACTIONS}] q_goal={np.array(q_goal)}  grip_target={grip_t:.4f} m")
+            #     print(f"[ACTION {i+1}/{K_ACTIONS}] q_goal={np.array(q_goal)}  grip_target={grip_t:.4f} m")
 
             #     _ = input("이 액션을 실행할까요? (엔터=실행 / ctrl+c=중단): ")
 
@@ -434,32 +434,32 @@ def main():
             #     try:
             #         node.gripper_move(width_m=clamp(grip_t, 0.0, 0.08), speed_mps=GRIPPER_SPEED)
             #     except Exception as e:
-            #         log.error(f"Gripper move error: {e}")
+            #         print(f"Gripper move error: {e}")
 
             #     # 4-2) 팔 이동: inactive → set params → active
             #     try:
             #         # 비활성화
             #         node.switch_controller(start=[], stop=[CONTROLLER_NAME], strict=True, timeout_s=5.0)
             #     except Exception as e:
-            #         log.warning(f"Deactivate skipped/failed: {e}")
+            #         print(f"Deactivate skipped/failed: {e}")
 
             #     # 파라미터 적용
             #     try:
             #         node.set_move_to_goal(q_goal=q_goal, speed_scale=ARM_SPEED_SCALE)
             #     except Exception as e:
-            #         log.error(f"set_move_to_goal failed: {e}")
+            #         print(f"set_move_to_goal failed: {e}")
             #         continue
 
             #     # 활성화(이때 move_to_goal이 on_activate에서 최신 파라미터로 궤적 생성)
             #     try:
             #         node.switch_controller(start=[CONTROLLER_NAME], stop=[], strict=True, timeout_s=5.0)
             #     except Exception as e:
-            #         log.error(f"Activate failed: {e}")
+            #         print(f"Activate failed: {e}")
             #         continue
 
             #     # 완료 대기 (컨트롤러가 process_finished=true로 세팅)
             #     finished = node.wait_process_finished(timeout_s=12.0)
-            #     log.info(f"Arm motion finished={finished}")
+            #     print(f"Arm motion finished={finished}")
             
             for i in range(min(K_ACTIONS, actions.shape[0])):
                 act = actions[i].astype(float)
@@ -470,7 +470,7 @@ def main():
                 q_goal   = (q_curr + dq).tolist()
                 grip_goal= clamp(grip_curr + d_grip, 0.0, 0.08)
 
-                log.info(
+                print(
                     "[ACTION %d/%d]\n"
                     "  q_curr= %s\n"
                     "  Δq    = %s (clamped by %.3f)\n"
@@ -483,40 +483,40 @@ def main():
                     grip_curr, d_grip, grip_goal
                 )
 
-                _ = input("이 액션을 실행할까요? (엔터=실행 / ctrl+c=중단): ")
+                # _ = input("이 액션을 실행할까요? (엔터=실행 / ctrl+c=중단): ")
 
                 # 1) 그리퍼 먼저
                 try:
                     node.gripper_move(width_m=grip_goal, speed_mps=GRIPPER_SPEED)
                 except Exception as e:
-                    log.error(f"Gripper move error: {e}")
+                    print(f"Gripper move error: {e}")
 
                 # 2) 팔 이동: inactive → set params → active
                 try:
                     node.switch_controller(start=[], stop=[CONTROLLER_NAME], strict=True, timeout_s=5.0)
                 except Exception as e:
-                    log.warning(f"Deactivate skipped/failed: {e}")
+                    print(f"Deactivate skipped/failed: {e}")
 
                 try:
                     node.set_move_to_goal(q_goal=q_goal, speed_scale=ARM_SPEED_SCALE)
                 except Exception as e:
-                    log.error(f"set_move_to_goal failed: {e}")
+                    print(f"set_move_to_goal failed: {e}")
                     continue
 
                 try:
                     node.switch_controller(start=[CONTROLLER_NAME], stop=[], strict=True, timeout_s=5.0)
                 except Exception as e:
-                    log.error(f"Activate failed: {e}")
+                    print(f"Activate failed: {e}")
                     continue
 
                 finished = node.wait_process_finished(timeout_s=12.0)
-                log.info(f"Arm motion finished={finished}")
+                print(f"Arm motion finished={finished}")
 
                 # 3) 실행 후 실제 상태를 다시 읽어 다음 Δ 적용 기준 업데이트
                 try:
                     q_curr, grip_curr = node.get_latest_state(wait_sec=2.0)
                 except Exception as e:
-                    log.warning(f"Failed to refresh state after action: {e}")
+                    print(f"Failed to refresh state after action: {e}")
                     # 실패해도 로컬 추정치로 계속 진행
                     q_curr   = np.array(q_goal, dtype=float)
                     grip_curr= grip_goal
@@ -524,7 +524,7 @@ def main():
             # 5) 다음 루프(새 상태/이미지로 다시 추론)
 
     except KeyboardInterrupt:
-        log.info("Interrupted by user.")
+        print("Interrupted by user.")
     finally:
         cap_front.release()
         cap_wrist.release()
