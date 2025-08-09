@@ -6,6 +6,7 @@ import cv2
 import numpy as np
 import requests
 from PIL import Image
+import time
 
 import rclpy
 from rclpy.node import Node
@@ -48,6 +49,8 @@ ARM_SPEED_SCALE    = float(os.environ.get("ARM_SPEED_SCALE", "0.20"))
 ACTION_SCALE   = 0.5
 PER_STEP_CLAMP = 0.10
 GRIPPER_STEP   = 0.005
+
+CAM_WARMUP_SEC = 0.15
 
 LOG_DIR            = os.environ.get("LOG_DIR", "./logs")
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -282,15 +285,37 @@ def open_camera(index: int) -> cv2.VideoCapture:
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
     if not cap.isOpened():
         raise RuntimeError(f"Cannot open camera index {index}")
+
+    t_end = time.time() + CAM_WARMUP_SEC
+    while time.time() < t_end:
+        cap.read()
+        time.sleep(0.01)
+
     return cap
 
+def _looks_green(frame: np.ndarray) -> bool:
+    # BGR 기준 (cv2가 BGR로 읽어옴)
+    b, g, r = cv2.split(frame)
+    gm, rm, bm = float(g.mean()), float(r.mean()), float(b.mean())
+    # 평균 G가 충분히 크고(R/B 대비) 초록 편향이면 True
+    return (gm > 60.0) and (gm > 1.3 * rm) and (gm > 1.3 * bm)
 
 def grab_244(cap: cv2.VideoCapture) -> np.ndarray:
     ok, frame = cap.read()
     if not ok:
         raise RuntimeError("Failed to grab frame")
-    resized = cv2.resize(frame, (IMG_SIZE, IMG_SIZE), interpolation=cv2.INTER_AREA)
-    return resized[:, :, ::-1]  # BGR→RGB
+
+    tries = 5
+    while _looks_green(frame) and tries > 0:
+        time.sleep(0.03)
+        ok, f2 = cap.read()
+        if ok:
+            frame = f2
+        tries -= 1
+
+    resized_bgr = cv2.resize(frame, (IMG_SIZE, IMG_SIZE), interpolation=cv2.INTER_AREA)
+
+    return resized_bgr[:, :, ::-1]
 
 
 def post_to_server(ext_img: np.ndarray, wrist_img: np.ndarray,
