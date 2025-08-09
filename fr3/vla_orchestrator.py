@@ -27,11 +27,11 @@ from franka_msgs.action import Homing as GripperHoming
 # =======================
 # 하이퍼파라미터 & 상수
 # =======================
-SERVER_URL         = os.environ.get("VLA_SERVER_URL", "http://<서버IP>:<포트>/api/infer")
-NAMESPACE          = os.environ.get("FRANKA_NS", "fr3")
+SERVER_URL         = "http://ip:port/api/infer"
+NAMESPACE          = "fr3"
 
-CAM_FRONT_INDEX    = int(os.environ.get("CAM_FRONT", "0"))     # 정면
-CAM_WRIST_INDEX    = int(os.environ.get("CAM_WRIST", "10"))    # 손목
+CAM_FRONT_INDEX    = 0
+CAM_WRIST_INDEX    = 10
 IMG_SIZE           = 244
 
 CONTROLLER_NAME    = "move_to_goal"
@@ -39,7 +39,7 @@ CM_PREFIX          = f"/{NAMESPACE}/controller_manager"
 CTRL_NODE_PREFIX   = f"/{NAMESPACE}/{CONTROLLER_NAME}"
 
 # k개 액션만 실행
-K_ACTIONS          = int(os.environ.get("K_ACTIONS", "3"))
+K_ACTIONS          = 10
 # 그리퍼 이동 속도(기본값). 프랑카 그리퍼 Move.goal = {width[m], speed[m/s]}
 GRIPPER_SPEED      = float(os.environ.get("GRIPPER_SPEED", "0.10"))
 # move_to_goal speed_scale 기본값(0.05~1.0 권장)
@@ -289,13 +289,7 @@ def grab_244(cap: cv2.VideoCapture) -> np.ndarray:
     ok, frame = cap.read()
     if not ok:
         raise RuntimeError("Failed to grab frame")
-    # 중앙 정사각형 crop → 244×244
-    h, w = frame.shape[:2]
-    s = min(h, w)
-    y0 = (h - s) // 2
-    x0 = (w - s) // 2
-    crop = frame[y0:y0 + s, x0:x0 + s]
-    resized = cv2.resize(crop, (IMG_SIZE, IMG_SIZE), interpolation=cv2.INTER_AREA)
+    resized = cv2.resize(frame, (IMG_SIZE, IMG_SIZE), interpolation=cv2.INTER_AREA)
     return resized[:, :, ::-1]  # BGR→RGB
 
 
