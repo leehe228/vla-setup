@@ -40,14 +40,14 @@ CM_PREFIX          = f"/{NAMESPACE}/controller_manager"
 CTRL_NODE_PREFIX   = f"/{NAMESPACE}/{CONTROLLER_NAME}"
 
 # k개 액션만 실행
-K_ACTIONS          = 10
+K_ACTIONS          = 1
 # 그리퍼 이동 속도(기본값). 프랑카 그리퍼 Move.goal = {width[m], speed[m/s]}
 GRIPPER_SPEED      = float(os.environ.get("GRIPPER_SPEED", "0.10"))
 # move_to_goal speed_scale 기본값(0.05~1.0 권장)
-ARM_SPEED_SCALE    = float(os.environ.get("ARM_SPEED_SCALE", "0.20"))
+ARM_SPEED_SCALE    = float(os.environ.get("ARM_SPEED_SCALE", "0.15"))
 
-ACTION_SCALE   = 0.5
-PER_STEP_CLAMP = 0.10
+ACTION_SCALE   = 0.3
+PER_STEP_CLAMP = 0.05
 GRIPPER_STEP   = 0.005
 
 CAM_WARMUP_SEC = 0.15
