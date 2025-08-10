@@ -173,9 +173,24 @@ class ResponseBody(BaseModel):
     actions: List[List[float]]   # (T, 8)
 
 
+MODEL_INFO = {
+    "pi0_fast_droid": {
+        "name": "pi0_fast_droid",
+        "url": "gs://openpi-assets/checkpoints/pi0_fast_droid",
+            
+    }, 
+    "pi0_droid": {
+        "name": "pi0_droid",
+        "url": "gs://openpi-assets/checkpoints/pi0_droid",
+        "action_shape": (10, 8)
+    }
+}
+
+SELECTED_MODEL = os.environ.get("MODEL", "pi0_droid")
+
 # ---------- load policy once ----------
-_cfg = _config.get_config("pi0_fast_droid")
-_ckpt = download.maybe_download("gs://openpi-assets/checkpoints/pi0_fast_droid")
+_cfg = _config.get_config(MODEL_INFO[SELECTED_MODEL]["name"])
+_ckpt = download.maybe_download(MODEL_INFO[SELECTED_MODEL]["url"])
 _policy = policy_config.create_trained_policy(_cfg, _ckpt)
 
 app = FastAPI(title="Pi-0 FAST Droid Inference")
