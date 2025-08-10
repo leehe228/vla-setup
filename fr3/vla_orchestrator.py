@@ -511,47 +511,6 @@ def main():
             
             q_curr = arm_q.copy()
             grip_curr = float(grip_w)
-
-            # 4) k개만 실행(각 단계마다 사용자 확인)
-            # for i in range(min(K_ACTIONS, actions.shape[0])):
-            #     act = actions[i]
-            #     q_goal = act[:7].astype(float).tolist()
-            #     grip_t = float(act[7])
-
-            #     print(f"[ACTION {i+1}/{K_ACTIONS}] q_goal={np.array(q_goal)}  grip_target={grip_t:.4f} m")
-
-            #     _ = input("이 액션을 실행할까요? (엔터=실행 / ctrl+c=중단): ")
-
-            #     # 4-1) 그리퍼 먼저
-            #     try:
-            #         node.gripper_move(width_m=clamp(grip_t, 0.0, 0.08), speed_mps=GRIPPER_SPEED)
-            #     except Exception as e:
-            #         print(f"Gripper move error: {e}")
-
-            #     # 4-2) 팔 이동: inactive → set params → active
-            #     try:
-            #         # 비활성화
-            #         node.switch_controller(start=[], stop=[CONTROLLER_NAME], strict=True, timeout_s=5.0)
-            #     except Exception as e:
-            #         print(f"Deactivate skipped/failed: {e}")
-
-            #     # 파라미터 적용
-            #     try:
-            #         node.set_move_to_goal(q_goal=q_goal, speed_scale=ARM_SPEED_SCALE)
-            #     except Exception as e:
-            #         print(f"set_move_to_goal failed: {e}")
-            #         continue
-
-            #     # 활성화(이때 move_to_goal이 on_activate에서 최신 파라미터로 궤적 생성)
-            #     try:
-            #         node.switch_controller(start=[CONTROLLER_NAME], stop=[], strict=True, timeout_s=5.0)
-            #     except Exception as e:
-            #         print(f"Activate failed: {e}")
-            #         continue
-
-            #     # 완료 대기 (컨트롤러가 process_finished=true로 세팅)
-            #     finished = node.wait_process_finished(timeout_s=12.0)
-            #     print(f"Arm motion finished={finished}")
             
             for i in range(min(K_ACTIONS, actions.shape[0])):
                 act = actions[i].astype(float)
