@@ -2,11 +2,11 @@
 import os, sys, time, json, base64, io, threading, logging
 from typing import Optional, List, Tuple
 
+import argparse
 import cv2
 import numpy as np
 import requests
 from PIL import Image
-import time
 
 import rclpy
 from rclpy.node import Node
@@ -53,6 +53,15 @@ GRIPPER_STEP   = 0.005
 CAM_WARMUP_SEC = 0.15
 CAM_FLUSH_MS = 120
 
+FRONT_BIAS = "center"   # exterior cam: center crop
+WRIST_BIAS = "bottom"   # wrist cam: bottom-biased to include gripper tips
+
+FRONT_ROT_K90  = 0
+FRONT_FLIP_H   = False
+
+WRIST_ROT_K90  = 0
+WRIST_FLIP_H   = False
+
 LOG_DIR            = os.environ.get("LOG_DIR", "./logs")
 os.makedirs(LOG_DIR, exist_ok=True)
 logging.basicConfig(
@@ -74,6 +83,32 @@ def pil_to_b64(img: Image.Image) -> str:
 
 def clamp(x, lo, hi):
     return max(lo, min(hi, x))
+
+
+def _apply_aug_rgb(rgb: np.ndarray, flip_h: bool = False, rot_k90: int = 0) -> np.ndarray:
+    """RGB 이미지에 수평 플립, 90°단위 회전 적용."""
+    if flip_h:
+        rgb = rgb[:, ::-1, :]
+    if rot_k90:
+        rgb = np.ascontiguousarray(np.rot90(rgb, k=rot_k90))
+    return rgb
+
+
+def _square_crop_with_bias(bgr: np.ndarray, bias: str) -> np.ndarray:
+    """BGR 프레임을 정사각으로 크롭하되, bias에 따라 중심 이동."""
+    h, w = bgr.shape[:2]
+    s = min(h, w)
+    if bias == "top":
+        y0 = 0;             x0 = (w - s) // 2
+    elif bias == "bottom":
+        y0 = h - s;         x0 = (w - s) // 2
+    elif bias == "left":
+        y0 = (h - s) // 2;  x0 = 0
+    elif bias == "right":
+        y0 = (h - s) // 2;  x0 = w - s
+    else:  # "center"
+        y0 = (h - s) // 2;  x0 = (w - s) // 2
+    return bgr[y0:y0 + s, x0:x0 + s]
 
 
 class FrankaOrchestrator(Node):
@@ -333,6 +368,40 @@ def grab_244(cap: cv2.VideoCapture) -> np.ndarray:
     return resized_bgr[:, :, ::-1]
 
 
+def grab_244_with_norm(cap: cv2.VideoCapture, *, bias: str, flip_h: bool, rot_k90: int) -> np.ndarray:
+    """카메라 플러시/그린 프레임 스킵 → 바이어스 크롭 → 244 리사이즈 → RGB 변환 → 방향 정규화."""
+    # flush buffered frames for CAM_FLUSH_MS
+    t_end = time.time() + (CAM_FLUSH_MS / 1000.0)
+    while time.time() < t_end:
+        cap.grab()
+
+    ok = cap.grab()
+    if not ok:
+        raise RuntimeError("Failed to grab (final) frame")
+    ok, frame = cap.retrieve()
+    if not ok:
+        raise RuntimeError("Failed to retrieve frame")
+
+    # skip initial greenish frames (sensor settling)
+    tries = 5
+    while _looks_green(frame) and tries > 0:
+        time.sleep(0.03)
+        cap.grab()
+        ok, f2 = cap.retrieve()
+        if ok:
+            frame = f2
+        tries -= 1
+
+    # square crop with bias, resize to 244
+    crop = _square_crop_with_bias(frame, bias=bias)
+    resized_bgr = cv2.resize(crop, (IMG_SIZE, IMG_SIZE), interpolation=cv2.INTER_AREA)
+
+    # BGR->RGB then apply flip/rot
+    rgb = resized_bgr[:, :, ::-1]
+    rgb = _apply_aug_rgb(rgb, flip_h=flip_h, rot_k90=rot_k90)
+    return rgb
+
+
 def post_to_server(ext_img: np.ndarray, wrist_img: np.ndarray,
                    joints: np.ndarray, grip_width: float,
                    prompt: str) -> np.ndarray:
@@ -373,6 +442,17 @@ def ensure_controller_ready(node: FrankaOrchestrator):
 
 
 def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--front-bias", choices=["center","top","bottom","left","right"],
+                    default=FRONT_BIAS)
+    ap.add_argument("--wrist-bias", choices=["center","top","bottom","left","right"],
+                    default=WRIST_BIAS)
+    ap.add_argument("--front-rot", type=int, choices=[0,1,2,3], default=FRONT_ROT_K90)
+    ap.add_argument("--wrist-rot", type=int, choices=[0,1,2,3], default=WRIST_ROT_K90)
+    ap.add_argument("--front-flip", action="store_true", default=FRONT_FLIP_H)
+    ap.add_argument("--wrist-flip", action="store_true", default=WRIST_FLIP_H)
+    args = ap.parse_args()
+    
     rclpy.init()
     node = FrankaOrchestrator()
 
@@ -403,8 +483,20 @@ def main():
 
             # 1) 상태 & 이미지 수집
             arm_q, grip_w = node.get_latest_state(wait_sec=3.0)
-            ext_img  = grab_244(cap_front)
-            wrist_img= grab_244(cap_wrist)
+            # ext_img  = grab_244(cap_front)
+            # wrist_img= grab_244(cap_wrist)
+            ext_img = grab_244_with_norm(
+                cap_front,
+                bias=args.front_bias,
+                flip_h=args.front_flip,
+                rot_k90=args.front_rot,
+            )
+            wrist_img = grab_244_with_norm(
+                cap_wrist,
+                bias=args.wrist_bias,
+                flip_h=args.wrist_flip,
+                rot_k90=args.wrist_rot,
+            )
 
             # 2) 프롬프트 입력(빈 입력이면 유지)
             # new_prompt = input("[PROMPT] (Press enter to keep): ").strip()
